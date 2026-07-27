@@ -1,0 +1,79 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TransactionStatus {
+  pending
+  authorized
+  captured
+  failed
+  voided
+  partially_refunded
+  refunded
+}
+
+model Merchant {
+  id          String   @id @default(uuid())
+  name        String
+  apiKey      String   @unique @map("api_key")
+  webhookUrl  String?  @map("webhook_url")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  transactions Transaction[]
+
+  @@map("merchants")
+}
+
+model Transaction {
+  id               String            @id @default(uuid())
+  merchantId       String            @map("merchant_id")
+  amount           Int
+  currency         String            @default("BRL")
+  status           TransactionStatus @default(pending)
+  cardLast4        String            @map("card_last4")
+  cardBrand        String            @map("card_brand")
+  idempotencyKey   String            @unique @map("idempotency_key")
+  failureReason    String?           @map("failure_reason")
+  authorizedAt     DateTime?         @map("authorized_at")
+  capturedAt       DateTime?         @map("captured_at")
+  voidedAt         DateTime?         @map("voided_at")
+  refundedAmount   Int               @default(0) @map("refunded_amount")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+
+  merchant Merchant @relation(fields: [merchantId], references: [id])
+  refunds  Refund[]
+  events   Event[]
+
+  @@map("transactions")
+}
+
+model Refund {
+  id            String   @id @default(uuid())
+  transactionId String   @map("transaction_id")
+  amount        Int
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+
+  @@map("refunds")
+}
+
+model Event {
+  id            String   @id @default(uuid())
+  transactionId String   @map("transaction_id")
+  type          String
+  payload       Json
+  delivered     Boolean  @default(false)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+
+  @@map("events")
+}
