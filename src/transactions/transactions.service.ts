@@ -1,13 +1,22 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
+import { isValidLuhn } from '../domain/luhn';
 
 @Injectable()
 export class TransactionsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async create(dto: CreateTransactionDto) {
+    if (!isValidLuhn(dto.cardNumber)) {
+      throw new BadRequestException('Número de cartão inválido');
+    }
+
     const merchant = await this.prisma.merchant.findUnique({
       where: { id: dto.merchantId },
     });
