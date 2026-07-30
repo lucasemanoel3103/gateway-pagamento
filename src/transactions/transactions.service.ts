@@ -138,4 +138,46 @@ export class TransactionsService {
       return updated;
     });
   }
+
+  async capture(transactionId: string) {
+    const transaction = await this.prisma.transaction.findUnique({
+      where: { id: transactionId },
+    });
+
+    if (!transaction) {
+      throw new NotFoundException('Transação não encontrada');
+    }
+
+    try {
+      assertValidTransition(
+        transaction.status as TransactionStatus,
+        TransactionStatus.CAPTURED,
+      );
+    } catch (error) {
+      if (error instanceof InvalidTransitionError) {
+        throw new UnprocessableEntityException(error.message);
+      }
+      throw error;
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.transaction.update({
+        where: { id: transactionId },
+        data: {
+          status: TransactionStatus.CAPTURED,
+          capturedAt: new Date(),
+        },
+      });
+
+      await tx.event.create({
+        data: {
+          transactionId: updated.id,
+          type: 'transaction.captured',
+          payload: updated satisfies Prisma.InputJsonValue,
+        },
+      });
+
+      return updated;
+    });
+  }
 }

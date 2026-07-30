@@ -16,4 +16,9 @@ export class TransactionsController {
   authorize(@Param('id') id: string) {
     return this.transactionsService.authorize(id);
   }
+
+  @Post(':id/capture')
+  capture(@Param('id') id: string) {
+    return this.transactionsService.capture(id);
+  }
 }
