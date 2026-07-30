@@ -2,11 +2,18 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
 import { isValidLuhn } from '../domain/luhn';
+import { shouldSimulateFailure } from '../domain/fraud-rules';
+import {
+  TransactionStatus,
+  assertValidTransition,
+  InvalidTransitionError,
+} from '../domain/transaction-status';
 
 @Injectable()
 export class TransactionsService {
@@ -75,5 +82,60 @@ export class TransactionsService {
 
       throw error;
     }
+  }
+
+  async authorize(transactionId: string) {
+    const transaction = await this.prisma.transaction.findUnique({
+      where: { id: transactionId },
+    });
+
+    if (!transaction) {
+      throw new NotFoundException('Transação não encontrada');
+    }
+
+    const willFail = shouldSimulateFailure(
+      transaction.amount,
+      transaction.cardLast4,
+    );
+    const nextStatus = willFail
+      ? TransactionStatus.FAILED
+      : TransactionStatus.AUTHORIZED;
+
+    try {
+      assertValidTransition(
+        transaction.status as TransactionStatus,
+        nextStatus,
+      );
+    } catch (error) {
+      if (error instanceof InvalidTransitionError) {
+        throw new UnprocessableEntityException(error.message);
+      }
+      throw error;
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.transaction.update({
+        where: { id: transactionId },
+        data: willFail
+          ? {
+              status: TransactionStatus.FAILED,
+              failureReason: 'Recusado pela simulação de antifraude',
+            }
+          : {
+              status: TransactionStatus.AUTHORIZED,
+              authorizedAt: new Date(),
+            },
+      });
+
+      await tx.event.create({
+        data: {
+          transactionId: updated.id,
+          type: willFail ? 'transaction.failed' : 'transaction.authorized',
+          payload: updated satisfies Prisma.InputJsonValue,
+        },
+      });
+
+      return updated;
+    });
   }
 }

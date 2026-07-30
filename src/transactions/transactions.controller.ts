@@ -1,5 +1,5 @@
 // src/transactions/transactions.controller.ts
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Param, Post } from '@nestjs/common';
 import { TransactionsService } from './transactions.service';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
 
@@ -10,5 +10,10 @@ export class TransactionsController {
   @Post()
   create(@Body() dto: CreateTransactionDto) {
     return this.transactionsService.create(dto);
+  }
+
+  @Post(':id/authorize')
+  authorize(@Param('id') id: string) {
+    return this.transactionsService.authorize(id);
   }
 }
