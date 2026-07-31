@@ -7,6 +7,7 @@ import {
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
+import { RefundTransactionDto } from './dto/refund-transaction.dto';
 import { isValidLuhn } from '../domain/luhn';
 import { shouldSimulateFailure } from '../domain/fraud-rules';
 import {
@@ -173,6 +174,71 @@ export class TransactionsService {
         data: {
           transactionId: updated.id,
           type: 'transaction.captured',
+          payload: updated satisfies Prisma.InputJsonValue,
+        },
+      });
+
+      return updated;
+    });
+  }
+
+  async refund(transactionId: string, dto: RefundTransactionDto) {
+    const transaction = await this.prisma.transaction.findUnique({
+      where: { id: transactionId },
+    });
+
+    if (!transaction) {
+      throw new NotFoundException('Transação não encontrada');
+    }
+
+    const remaining = transaction.amount - transaction.refundedAmount;
+
+    if (dto.amount > remaining) {
+      throw new BadRequestException(
+        `Valor de estorno excede o saldo disponível (${remaining} centavos restantes)`,
+      );
+    }
+
+    const newRefundedAmount = transaction.refundedAmount + dto.amount;
+    const isFullyRefunded = newRefundedAmount === transaction.amount;
+    const nextStatus = isFullyRefunded
+      ? TransactionStatus.REFUNDED
+      : TransactionStatus.PARTIALLY_REFUNDED;
+
+    try {
+      assertValidTransition(
+        transaction.status as TransactionStatus,
+        nextStatus,
+      );
+    } catch (error) {
+      if (error instanceof InvalidTransitionError) {
+        throw new UnprocessableEntityException(error.message);
+      }
+      throw error;
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.refund.create({
+        data: {
+          transactionId,
+          amount: dto.amount,
+        },
+      });
+
+      const updated = await tx.transaction.update({
+        where: { id: transactionId },
+        data: {
+          status: nextStatus,
+          refundedAmount: newRefundedAmount,
+        },
+      });
+
+      await tx.event.create({
+        data: {
+          transactionId: updated.id,
+          type: isFullyRefunded
+            ? 'transaction.refunded'
+            : 'transaction.partially_refunded',
           payload: updated satisfies Prisma.InputJsonValue,
         },
       });

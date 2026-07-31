@@ -2,6 +2,7 @@
 import { Body, Controller, Param, Post } from '@nestjs/common';
 import { TransactionsService } from './transactions.service';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
+import { RefundTransactionDto } from './dto/refund-transaction.dto';
 
 @Controller('transactions')
 export class TransactionsController {
@@ -20,5 +21,10 @@ export class TransactionsController {
   @Post(':id/capture')
   capture(@Param('id') id: string) {
     return this.transactionsService.capture(id);
+  }
+
+  @Post(':id/refund')
+  refund(@Param('id') id: string, @Body() dto: RefundTransactionDto) {
+    return this.transactionsService.refund(id, dto);
   }
 }
