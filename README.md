@@ -1,98 +1,179 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# gateway-pagamento
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Simulação de um gateway de pagamentos construída para estudar, na prática, os
+problemas reais que esse tipo de sistema precisa resolver: máquina de estados
+consistente, idempotência, estornos parciais e um log de eventos confiável.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+Não processa cartões de verdade — o objetivo é a **engenharia por trás** de um
+fluxo de pagamento: transições de estado controladas, escrita atômica no banco
+e simulação determinística de aprovação/recusa.
 
-## Description
+## Stack
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+- **NestJS 11** (TypeScript)
+- **Prisma 7** com `@prisma/adapter-pg` (driver adapter, sem engine binário)
+- **PostgreSQL** via Docker Compose
+- **class-validator** / **class-transformer** para validação de entrada
+- **Jest** para testes
 
-## Project setup
+## Funcionalidades
 
-```bash
-$ npm install
+- **Máquina de estados explícita** para o ciclo de vida da transação, com
+  validação de toda transição antes de persistir (ver diagrama abaixo)
+- **Idempotência** via `idempotencyKey` único: reenviar a mesma requisição de
+  criação retorna a transação já existente em vez de duplicar, inclusive sob
+  condição de corrida (tratamento do erro `P2002` do Postgres)
+- **Estornos parciais**: uma transação capturada pode ser estornada em várias
+  parcelas até o valor total, com o saldo restante recalculado a cada estorno
+- **Log de eventos atômico**: toda mudança de estado grava um `Event` na
+  mesma transação de banco (`$transaction`) que atualiza a transação — nunca
+  existe um estado sem o evento correspondente
+- **Simulação de antifraude**: valores acima de R$ 10.000,00 e cartões
+  terminados em `0000` são recusados automaticamente na autorização
+- **Validação de Luhn** no número do cartão antes de qualquer processamento
+
+## Máquina de estados
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: POST /transactions
+    pending --> authorized: POST /:id/authorize (aprovado)
+    pending --> failed: POST /:id/authorize (recusado)
+    authorized --> captured: POST /:id/capture
+    authorized --> voided
+    captured --> partially_refunded: POST /:id/refund (parcial)
+    captured --> refunded: POST /:id/refund (total)
+    partially_refunded --> partially_refunded: novo estorno parcial
+    partially_refunded --> refunded: estorno completa o saldo
+    failed --> [*]
+    voided --> [*]
+    refunded --> [*]
 ```
 
-## Compile and run the project
+Cada transição passa por `assertValidTransition` (`src/domain/transaction-status.ts`)
+antes de tocar no banco. Uma transição fora do mapa lança
+`InvalidTransitionError`, convertido em `422 Unprocessable Entity` pela API —
+não existe caminho para a transação ficar em um estado inconsistente.
 
-```bash
-# development
-$ npm run start
+## Estrutura
 
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+```
+src/
+  domain/                 # regras de negócio puras, sem dependência de framework
+    transaction-status.ts # máquina de estados + validação de transição
+    fraud-rules.ts         # regras de simulação de antifraude
+    luhn.ts                 # validação de número de cartão
+  transactions/
+    transactions.controller.ts
+    transactions.service.ts # orquestra: valida → transaciona → registra evento
+    dto/
+  prisma/
+    prisma.service.ts       # client global, adapter @prisma/adapter-pg
+prisma/
+  schema.prisma             # Merchant, Transaction, Refund, Event
 ```
 
-## Run tests
+A separação de `domain/` é proposital: as regras de transição e antifraude
+não importam nada do NestJS nem do Prisma, então dá pra testá-las isoladas e
+reaproveitá-las se o transporte (REST → outra coisa) mudar.
+
+## Modelo de dados
+
+- **Merchant** — lojista dono das transações (autenticação simplificada por `apiKey`)
+- **Transaction** — estado atual, valores, `idempotencyKey` único, `refundedAmount`
+- **Refund** — cada estorno parcial ou total, associado à transação
+- **Event** — trilha de auditoria: um registro por mudança de estado, com o
+  payload completo da transação naquele momento
+
+## Como rodar localmente
+
+Pré-requisitos: Node.js, Docker.
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+git clone https://github.com/lucasemanoel3103/gateway-pagamento.git
+cd gateway-pagamento
+cp .env.example .env        # preencha POSTGRES_USER/PASSWORD/DB e DATABASE_URL
+npm install
+docker compose up -d
+npx prisma generate
+npx prisma migrate dev
+npm run start:dev
 ```
 
-## Deployment
+A API sobe em `http://localhost:3000`.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+> **Nota:** como ainda não há seed, é preciso criar um `Merchant` manualmente
+> (via `npx prisma studio`) antes de criar a primeira transação — isso está
+> no roadmap abaixo.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Endpoints
+
+| Método | Rota                          | Descrição                            |
+| ------ | ------------------------------ | -------------------------------------- |
+| POST   | `/transactions`                 | Cria a transação (idempotente)         |
+| POST   | `/transactions/:id/authorize`   | Autoriza (ou recusa via antifraude)    |
+| POST   | `/transactions/:id/capture`     | Captura uma transação autorizada       |
+| POST   | `/transactions/:id/refund`      | Estorna, total ou parcialmente         |
+
+### Exemplo — criar e processar uma transação
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+# 1. Criar transação
+curl -X POST http://localhost:3000/transactions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "merchantId": "<uuid-do-merchant>",
+    "amount": 5000,
+    "currency": "BRL",
+    "cardNumber": "4111111111111111",
+    "cardBrand": "visa",
+    "idempotencyKey": "pedido-123"
+  }'
+
+# 2. Autorizar
+curl -X POST http://localhost:3000/transactions/<id>/authorize
+
+# 3. Capturar
+curl -X POST http://localhost:3000/transactions/<id>/capture
+
+# 4. Estornar parcialmente
+curl -X POST http://localhost:3000/transactions/<id>/refund \
+  -H "Content-Type: application/json" \
+  -d '{ "amount": 2000 }'
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+`amount` sempre em centavos.
 
-## Resources
+## Testes
 
-Check out a few resources that may come in handy when working with NestJS:
+```bash
+npm run test        # unitários
+npm run test:e2e    # end-to-end
+npm run test:cov    # cobertura
+```
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+## Decisões técnicas
 
-## Support
+- **Amount em centavos (`Int`)**: evita os problemas clássicos de ponto
+  flutuante com dinheiro.
+- **Idempotência a nível de banco**: a constraint `@unique` em
+  `idempotencyKey` é a fonte da verdade, não só uma checagem em memória — por
+  isso o tratamento do erro `P2002` sob corrida.
+- **Evento sempre na mesma transação que o estado**: se a escrita do evento
+  falhar, a mudança de estado também falha (rollback). Isso evita o cenário
+  clássico de "estado mudou mas ninguém ficou sabendo".
+- **Regras de domínio sem dependência de framework**: `transaction-status.ts`,
+  `fraud-rules.ts` e `luhn.ts` são funções puras — fáceis de testar e de ler
+  sem precisar entender NestJS ou Prisma.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## Roadmap
 
-## Stay in touch
+- [ ] Seed inicial (Merchant de teste) para facilitar onboarding
+- [ ] Testes e2e cobrindo o ciclo completo (create → authorize → capture → refund)
+- [ ] Webhooks assíncronos: disparar `webhookUrl` do Merchant a cada `Event`
+      criado (o campo `delivered` em `Event` já existe pensando nisso)
+- [ ] Endpoint `GET /transactions/:id` e listagem com filtros
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+## Licença
 
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+MIT
