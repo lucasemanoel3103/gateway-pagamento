@@ -166,14 +166,6 @@ npm run test:cov    # cobertura
   `fraud-rules.ts` e `luhn.ts` são funções puras — fáceis de testar e de ler
   sem precisar entender NestJS ou Prisma.
 
-## Roadmap
-
-- [ ] Seed inicial (Merchant de teste) para facilitar onboarding
-- [ ] Testes e2e cobrindo o ciclo completo (create → authorize → capture → refund)
-- [ ] Webhooks assíncronos: disparar `webhookUrl` do Merchant a cada `Event`
-      criado (o campo `delivered` em `Event` já existe pensando nisso)
-- [ ] Endpoint `GET /transactions/:id` e listagem com filtros
-
 ## Licença
 
 MIT
