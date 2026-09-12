@@ -1,5 +1,7 @@
 # gateway-pagamento
 
+[![CI](https://github.com/lucasemanoel3103/gateway-pagamento/actions/workflows/ci.yml/badge.svg)](https://github.com/lucasemanoel3103/gateway-pagamento/actions/workflows/ci.yml)
+
 Simulação de um gateway de pagamentos construída para estudar, na prática, os
 problemas reais que esse tipo de sistema precisa resolver: máquina de estados
 consistente, idempotência, estornos parciais e um log de eventos confiável.
