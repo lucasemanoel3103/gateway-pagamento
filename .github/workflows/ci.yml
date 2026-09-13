@@ -27,6 +27,7 @@ jobs:
 
         env:
             DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gateway_test
+            DIRECT_URL: postgresql://postgres:postgres@localhost:5432/gateway_test
             POSTGRES_USER: postgres
             POSTGRES_PASSWORD: postgres
             POSTGRES_DB: gateway_test
