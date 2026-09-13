@@ -2,6 +2,9 @@
 
 [![CI](https://github.com/lucasemanoel3103/gateway-pagamento/actions/workflows/ci.yml/badge.svg)](https://github.com/lucasemanoel3103/gateway-pagamento/actions/workflows/ci.yml)
 
+🔗 **API em produção:** [https://gateway-pagamento-rjhg.onrender.com](https://gateway-pagamento-rjhg.onrender.com)
+> Hospedada no free tier do Render — a primeira requisição depois de um tempo sem uso pode levar ~50s pra "acordar" o serviço.
+
 Simulação de um gateway de pagamentos construída para estudar, na prática, os
 problemas reais que esse tipo de sistema precisa resolver: máquina de estados
 consistente, idempotência, estornos parciais e um log de eventos confiável.
@@ -14,9 +17,12 @@ e simulação determinística de aprovação/recusa.
 
 - **NestJS 11** (TypeScript)
 - **Prisma 7** com `@prisma/adapter-pg` (driver adapter, sem engine binário)
-- **PostgreSQL** via Docker Compose
+- **PostgreSQL** — Docker Compose localmente, [Supabase](https://supabase.com) em produção
 - **class-validator** / **class-transformer** para validação de entrada
 - **Jest** para testes
+- **Docker** — build multi-stage para produção
+- **GitHub Actions** — CI (lint, build, testes unitários e e2e)
+- **Render** — deploy da aplicação
 
 ## Funcionalidades
 
@@ -73,6 +79,9 @@ src/
     prisma.service.ts       # client global, adapter @prisma/adapter-pg
 prisma/
   schema.prisma             # Merchant, Transaction, Refund, Event
+.github/
+  workflows/ci.yml          # pipeline de CI
+Dockerfile                  # build multi-stage de produção
 ```
 
 A separação de `domain/` é proposital: as regras de transição e antifraude
@@ -87,9 +96,54 @@ reaproveitá-las se o transporte (REST → outra coisa) mudar.
 - **Event** — trilha de auditoria: um registro por mudança de estado, com o
   payload completo da transação naquele momento
 
+## CI/CD
+
+Todo `push` ou `pull request` pra `main` dispara o workflow em
+`.github/workflows/ci.yml`, que:
+
+1. Sobe um Postgres 16 descartável como serviço do próprio GitHub Actions
+2. Instala as dependências (`npm ci`)
+3. Gera o Prisma Client (`prisma generate`)
+4. Aplica as migrations no banco de CI (`prisma migrate deploy`)
+5. Roda o lint, o build e os testes (unitários + e2e)
+
+Se qualquer etapa falhar, o commit/PR é marcado com ❌ — é o que garante que
+código quebrado não chega na `main` sem passar por essa verificação.
+
+## Deploy
+
+A aplicação roda em produção como um container Docker:
+
+- **Build**: `Dockerfile` multi-stage — a etapa de build compila o TypeScript
+  e gera o Prisma Client; a imagem final de produção carrega só o resultado
+  compilado (`dist/`) e as dependências de runtime, sem ferramentas de
+  desenvolvimento (ESLint, Jest, TypeScript)
+- **Hospedagem**: [Render](https://render.com), que builda a imagem direto do
+  `Dockerfile` a cada push na `main`
+- **Banco de dados**: [Supabase](https://supabase.com) (Postgres gerenciado,
+  free tier), acessado via *connection pooler* — necessário porque a
+  aplicação roda num container de vida curta/escalável, não numa conexão
+  fixa de longa duração
+
+### Reproduzindo o deploy
+
+1. Cria um projeto no Supabase e pega as duas connection strings em
+   **Connect → ORM → Prisma**: uma via *transaction pooler* (porta 6543,
+   usada em runtime) e outra via *session pooler* (porta 5432, usada só
+   pelo Prisma CLI para migrations)
+2. Define `DATABASE_URL` (transaction pooler) e `DIRECT_URL` (session
+   pooler) no `.env` local e roda `npx prisma migrate deploy` pra criar as
+   tabelas no banco do Supabase
+3. Cria um Web Service no Render, plano Free, apontando pro `Dockerfile`
+   deste repositório
+4. Configura as mesmas variáveis `DATABASE_URL`, `DIRECT_URL` e `PORT=3000`
+   no serviço do Render
+
 ## Como rodar localmente
 
 Pré-requisitos: Node.js, Docker.
+
+**Opção A — Postgres local via Docker Compose:**
 
 ```bash
 git clone https://github.com/lucasemanoel3103/gateway-pagamento.git
@@ -102,11 +156,28 @@ npx prisma migrate dev
 npm run start:dev
 ```
 
+**Opção B — apontando direto pro Supabase** (mesmo banco usado em produção):
+
+```bash
+git clone https://github.com/lucasemanoel3103/gateway-pagamento.git
+cd gateway-pagamento
+npm install
+# preencha DATABASE_URL e DIRECT_URL no .env com as strings do Supabase
+npx prisma generate
+npm run start:dev
+```
+
 A API sobe em `http://localhost:3000`.
 
+**Rodando via Docker (igual em produção):**
+
+```bash
+docker build -t gateway-pagamento .
+docker run --rm -p 3000:3000 --env-file .env gateway-pagamento
+```
+
 > **Nota:** como ainda não há seed, é preciso criar um `Merchant` manualmente
-> (via `npx prisma studio`) antes de criar a primeira transação — isso está
-> no roadmap abaixo.
+> (via `npx prisma studio`) antes de criar a primeira transação.
 
 ## Endpoints
 
@@ -144,7 +215,8 @@ curl -X POST http://localhost:3000/transactions/<id>/refund \
   -d '{ "amount": 2000 }'
 ```
 
-`amount` sempre em centavos.
+`amount` sempre em centavos. Troque `http://localhost:3000` pela URL de
+produção acima pra testar direto contra o ambiente hospedado.
 
 ## Testes
 
@@ -167,6 +239,13 @@ npm run test:cov    # cobertura
 - **Regras de domínio sem dependência de framework**: `transaction-status.ts`,
   `fraud-rules.ts` e `luhn.ts` são funções puras — fáceis de testar e de ler
   sem precisar entender NestJS ou Prisma.
+- **Duas connection strings do Supabase (`DATABASE_URL`/`DIRECT_URL`)**: o
+  *transaction pooler* (6543) atende bem muitas conexões curtas em runtime,
+  mas não suporta certas operações de schema — por isso migrations usam o
+  *session pooler* (5432) via `DIRECT_URL`.
+- **Multi-stage no Dockerfile**: a imagem final de produção não carrega
+  TypeScript, ESLint nem Jest — só o `dist/` compilado e dependências de
+  runtime, o que mantém a imagem pequena e o build no Render rápido.
 
 ## Licença
 
